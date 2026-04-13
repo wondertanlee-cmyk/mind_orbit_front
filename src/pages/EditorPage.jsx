@@ -5,8 +5,39 @@ import 'reactflow/dist/style.css';
 import { getMap, putMap } from '../utils/db';
 import useMindMap from '../hooks/useMindMap';
 
+function MindNode({ data }) {
+  const [draft, setDraft] = useState(data.label ?? '');
+
+  if (data.isEditing) {
+    return (
+      <input
+        className="inline-node-input"
+        value={draft}
+        autoFocus
+        maxLength={50}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={() => data.onLabelCommit(draft)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault();
+            data.onLabelCommit(draft);
+          }
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            data.onLabelCancel();
+          }
+        }}
+      />
+    );
+  }
+
+  return <span>{data.label}</span>;
+}
+
 function EditorCanvas({ map }) {
   const navigate = useNavigate();
+  const flowRef = useRef(null);
+  const [flowInstance, setFlowInstance] = useState(null);
   const {
     nodes,
     edges,
@@ -26,11 +57,11 @@ function EditorCanvas({ map }) {
     toggleNodeTextStyle,
   } = useMindMap(map);
 
-  const [draftLabel, setDraftLabel] = useState('');
   const [titleDraft, setTitleDraft] = useState(map.title ?? '');
   const [isSaveModalOpen, setIsSaveModalOpen] = useState(false);
   const [saveStatus, setSaveStatus] = useState('저장됨');
   const [toastMessage, setToastMessage] = useState('');
+  const [toolbarBottom, setToolbarBottom] = useState(12);
   const didMountRef = useRef(false);
 
   const persistMap = useCallback(
@@ -124,7 +155,22 @@ function EditorCanvas({ map }) {
 
   const handleCanvasClick = () => {
     if (nodes.length === 0) {
-      ensureRootNode();
+      let position = { x: 0, y: 0 };
+
+      if (flowInstance && flowRef.current) {
+        const bounds = flowRef.current.getBoundingClientRect();
+        position = flowInstance.screenToFlowPosition({
+          x: bounds.left + bounds.width / 2,
+          y: bounds.top + bounds.height / 2,
+        });
+      }
+
+      const rootNode = ensureRootNode(position);
+      requestAnimationFrame(() => {
+        if (rootNode && flowInstance) {
+          flowInstance.setCenter(rootNode.position.x, rootNode.position.y, { zoom: 1.1, duration: 250 });
+        }
+      });
       return;
     }
 
@@ -132,10 +178,68 @@ function EditorCanvas({ map }) {
     setEditingNodeId(null);
   };
 
+  const handleNodeLabelCommit = useCallback(
+    (nodeId, nextValue) => {
+      updateNodeLabel(nodeId, nextValue.trim());
+    },
+    [updateNodeLabel]
+  );
+
+  useEffect(() => {
+    if (!window.visualViewport) return undefined;
+
+    const syncToolbar = () => {
+      const keyboardHeight = Math.max(0, window.innerHeight - window.visualViewport.height);
+      setToolbarBottom(12 + keyboardHeight);
+    };
+
+    window.visualViewport.addEventListener('resize', syncToolbar);
+    window.visualViewport.addEventListener('scroll', syncToolbar);
+    syncToolbar();
+
+    return () => {
+      window.visualViewport.removeEventListener('resize', syncToolbar);
+      window.visualViewport.removeEventListener('scroll', syncToolbar);
+    };
+  }, []);
+
+  useEffect(() => {
+    const onShortcut = (event) => {
+      const activeTag = document.activeElement?.tagName?.toLowerCase();
+      const isTyping =
+        activeTag === 'input' ||
+        activeTag === 'textarea' ||
+        document.activeElement?.isContentEditable;
+      if (isTyping) return;
+      if (!selectedNode) return;
+
+      if (event.key === 'Tab') {
+        event.preventDefault();
+        addChildNode(selectedNode.id);
+      }
+
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        addSiblingNode(selectedNode.id);
+      }
+
+      if (event.key === 'Delete' || event.key === 'Backspace') {
+        event.preventDefault();
+        deleteNodeRecursively(selectedNode.id);
+      }
+    };
+
+    window.addEventListener('keydown', onShortcut);
+    return () => window.removeEventListener('keydown', onShortcut);
+  }, [addChildNode, addSiblingNode, deleteNodeRecursively, selectedNode]);
+
+  const nodeTypes = useMemo(() => ({ mindNode: MindNode }), []);
+
   const decoratedNodes = useMemo(
     () =>
       nodes.map((node) => ({
         ...node,
+        type: 'mindNode',
         style: {
           background: node.data?.isRoot ? '#2d2663' : '#1f1a45',
           color: '#ffffff',
@@ -151,8 +255,14 @@ function EditorCanvas({ map }) {
           fontStyle: node.data?.style?.italic ? 'italic' : 'normal',
           textDecoration: node.data?.style?.underline ? 'underline' : 'none',
         },
+        data: {
+          ...node.data,
+          isEditing: editingNodeId === node.id,
+          onLabelCommit: (value) => handleNodeLabelCommit(node.id, value),
+          onLabelCancel: () => setEditingNodeId(null),
+        },
       })),
-    [nodes, selectedNodeId]
+    [editingNodeId, handleNodeLabelCommit, nodes, selectedNodeId, setEditingNodeId]
   );
 
   return (
@@ -176,10 +286,11 @@ function EditorCanvas({ map }) {
         </button>
       ) : null}
 
-      <section className="flow-shell">
+      <section ref={flowRef} className="flow-shell">
         <ReactFlow
           nodes={decoratedNodes}
           edges={edges}
+          nodeTypes={nodeTypes}
           fitView
           minZoom={0.2}
           maxZoom={2}
@@ -188,18 +299,14 @@ function EditorCanvas({ map }) {
           zoomOnDoubleClick={false}
           panOnScroll={false}
           selectionOnDrag={false}
+          onInit={setFlowInstance}
           onPaneClick={handleCanvasClick}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
           onNodeClick={(_, node) => {
             setSelectedNodeId(node.id);
-            setEditingNodeId(null);
-          }}
-          onNodeDoubleClick={(_, node) => {
-            setSelectedNodeId(node.id);
             setEditingNodeId(node.id);
-            setDraftLabel(node.data?.label ?? '');
           }}
         >
           <Background color="#343059" />
@@ -207,7 +314,7 @@ function EditorCanvas({ map }) {
         </ReactFlow>
       </section>
 
-      <section className="editor-toolbar">
+      <section className="editor-toolbar floating-toolbar" style={{ bottom: `${toolbarBottom}px` }}>
         <button
           type="button"
           className="btn-primary"
@@ -257,38 +364,6 @@ function EditorCanvas({ map }) {
           삭제
         </button>
       </section>
-
-      {editingNodeId ? (
-        <section className="card">
-          <p className="muted">노드 텍스트 편집</p>
-          <input
-            className="node-input"
-            value={draftLabel}
-            maxLength={50}
-            onChange={(event) => setDraftLabel(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                updateNodeLabel(editingNodeId, draftLabel.trim());
-              }
-              if (event.key === 'Escape') {
-                setEditingNodeId(null);
-              }
-            }}
-          />
-          <div className="editor-actions">
-            <button
-              type="button"
-              className="btn-primary"
-              onClick={() => updateNodeLabel(editingNodeId, draftLabel.trim())}
-            >
-              적용
-            </button>
-            <button type="button" className="btn-danger" onClick={() => setEditingNodeId(null)}>
-              취소
-            </button>
-          </div>
-        </section>
-      ) : null}
 
       {isSaveModalOpen ? (
         <div className="modal-backdrop" role="presentation" onClick={() => setIsSaveModalOpen(false)}>
@@ -370,7 +445,7 @@ function EditorPage() {
   }
 
   return (
-    <main className="page">
+    <main className="page editor-page">
       <EditorCanvas key={map.id} map={map} />
     </main>
   );

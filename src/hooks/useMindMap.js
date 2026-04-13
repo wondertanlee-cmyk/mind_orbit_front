@@ -6,8 +6,8 @@ import {
   MarkerType,
 } from 'reactflow';
 
-const ROOT_X = 40;
-const ROOT_Y = 120;
+const ROOT_X = 0;
+const ROOT_Y = 0;
 const HORIZONTAL_GAP = 220;
 const VERTICAL_GAP = 90;
 
@@ -30,7 +30,7 @@ export default function useMindMap(initialMap) {
   const [selectedNodeId, setSelectedNodeId] = useState(null);
   const [editingNodeId, setEditingNodeId] = useState(null);
 
-  const ensureRootNode = useCallback(() => {
+  const ensureRootNode = useCallback((position) => {
     if (nodes.length > 0) {
       return nodes[0];
     }
@@ -39,8 +39,8 @@ export default function useMindMap(initialMap) {
     const root = createNode({
       id: rootId,
       label: '중심 주제',
-      x: ROOT_X,
-      y: ROOT_Y,
+      x: position?.x ?? ROOT_X,
+      y: position?.y ?? ROOT_Y,
       isRoot: true,
     });
 
